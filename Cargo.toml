@@ -38,3 +38,4 @@ serde_json = "1.0"
 # 只在非安卓环境引入 tokio（Termux 虽然是安卓，但 cargo run 时我们不需要 full tokio，这里保持简单）
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tokio = { version = "1.37", features = ["full"] }
+#
