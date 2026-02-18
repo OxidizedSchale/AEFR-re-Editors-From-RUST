@@ -1,0 +1,37 @@
+[package]
+name = "aefr"
+version = "0.5.4"
+edition = "2021"
+
+# 这是一个混合项目：既能生成 APK (cdylib)，也能生成桌面/Termux程序 (bin)
+[lib]
+name = "aefr_lib"
+crate-type = ["cdylib", "rlib"]
+path = "src/main.rs"
+
+[[bin]]
+name = "aefr"
+path = "src/main.rs"
+
+[dependencies]
+# 必须开启 android-game-activity，否则安卓入口会报错
+eframe = { version = "0.27", features = ["wgpu", "persistence", "android-game-activity"] }
+egui = "0.27"
+egui_extras = { version = "0.27", features = ["all_loaders"] }
+
+# 并行计算
+rayon = "1.10"
+
+# Spine 动画
+rusty_spine = "0.6.0"
+
+# 图像处理
+image = { version = "0.25", features = ["jpeg", "png", "webp"] }
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 只在非安卓环境引入 tokio（Termux 虽然是安卓，但 cargo run 时我们不需要 full tokio，这里保持简单）
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tokio = { version = "1.37", features = ["full"] }
