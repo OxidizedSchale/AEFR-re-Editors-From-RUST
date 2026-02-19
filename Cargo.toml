@@ -1,12 +1,12 @@
 [package]
 name = "aefr"
-version = "0.5.4"
+version = "0.1.0"
 edition = "2021"
 authors = ["Dye<3997101522@qq.com>"]
 description = "AEFR're Editors From RUST - A high-performance, open-source editor for Blue Archive fan-content."
 license = "GPL-3.0-only" 
 
-# 这是一个混合项目：既能生成 APK (cdylib)，也能生成桌面/Termux程序 (bin)
+# 混合项目：既能生成 APK (cdylib)，也能生成桌面/Termux程序 (bin)
 [lib]
 name = "aefr_lib"
 crate-type = ["cdylib", "rlib"]
