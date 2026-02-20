@@ -6,47 +6,50 @@ authors = ["Dye<3997101522@qq.com>"]
 description = "AEFR're Editors From RUST - A high-performance, open-source editor for Blue Archive fan-content."
 license = "GPL-3.0-only" 
 
-# [lib] 用于生成安卓 APK 需要的动态库 (.so)
 [lib]
 name = "aefr_lib"
 crate-type = ["cdylib", "rlib"]
 path = "src/main.rs"
 
-# [[bin]] 用于桌面端和 Termux 直接运行的可执行文件
 [[bin]]
 name = "aefr"
 path = "src/main.rs"
 
 [dependencies]
-# 核心 UI 框架
-# features 开启 wgpu (GPU加速), persistence (自动保存窗口位置), android-game-activity (安卓游戏模式)
+# GUI & WGPU
 eframe = { version = "0.27", features = ["wgpu", "persistence", "android-game-activity"] }
 egui = "0.27"
 egui_extras = { version = "0.27", features = ["all_loaders"] }
 
-# 图像处理 (锁定 0.24 以匹配 egui 0.27)
-image = { version = "0.24", features = ["jpeg", "png", "webp"] }
+# 图像处理
+image = { version = "0.25", features = ["jpeg", "png", "webp"] }
 
-# Spine 动画运行时 (0.8 版本支持物理特性)
+# Spine 动画 (核心)
 rusty_spine = "0.8"
 
-# 并行计算 (多线程加载资源)
+# 并行计算 (多核加速)
 rayon = "1.10"
+
+# 【新增】跨平台音频播放库
+rodio = { version = "0.19", features = ["wav", "vorbis", "mp3"] }
 
 # 序列化
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# --- 关键修改：针对安卓平台的特殊依赖 ---
-# 这解决了 Termux 编译时找不到 AndroidApp 类型的问题
+# 安卓特定依赖
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.5", features = ["game-activity"] }
 
-# --- 针对非安卓平台 (桌面) 的依赖 ---
-# 桌面端可能需要 tokio 进行更复杂的异步操作，这里按需引入
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tokio = { version = "1.37", features = ["full"] }
-# 只在非安卓环境引入 tokio（Termux 虽然是安卓，但 cargo run 时我们不需要 full tokio，这里保持简单）
-[target.'cfg(not(target_os = "android"))'.dependencies]
-tokio = { version = "1.37", features = ["full"] }
-#
+
+# 编译配置 (Windows 静态链接，确保无依赖运行)
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-args=-static", "-C", "target-feature=+crt-static"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
