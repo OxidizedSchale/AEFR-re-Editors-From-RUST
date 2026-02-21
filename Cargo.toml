@@ -2,7 +2,7 @@
 name = "aefr"
 version = "0.8.0"
 edition = "2021"
-authors = ["Dye<3997101522@qq.com>"]
+authors = ["OxidizedSchale<3997101522@qq.com>"]
 description = "AEFR's Eternal Freedom & Rust-rendered - A high-performance, open-source editor for Blue Archive fan-content."
 license = "GPL-3.0-only" 
 
