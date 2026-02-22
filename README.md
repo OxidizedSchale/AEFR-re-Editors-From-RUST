@@ -22,6 +22,7 @@ AEFR 采用 指令驱动 (Command-Driven) 的交互方式。点击界面左上�
 说明: 瞬间切换背景图片，支持 .jpg, .png, .webp。
 
 示例:
+
 BG C:\Assets\BlueArchive\BG_Classroom.png
 
 装填角色 (Spine)
@@ -31,7 +32,9 @@ BG C:\Assets\BlueArchive\BG_Classroom.png
 说明: 将角色加载到指定槽位。AEFR 提供 0~4 号共 5 个槽位，支持自动排版。加载成功后，控制台会打印出该角色可用的动作列表。
 
 示例:
+
 LOAD 0 D:\Assets\Shiroko\Shiroko_Home.atlas
+
 2. 动作与演出 (Motion)
 
 切换动作
@@ -43,8 +46,11 @@ LOAD 0 D:\Assets\Shiroko\Shiroko_Home.atlas
 注意: 动作名必须精确匹配（加载角色时控制台会列出可用动作）。
 
 示例:
+
 ANIM 0 Start_Idle_01 true    (让白子开始循环待机动作)
+
 ANIM 1 Attack_Normal false   (让 1 号位角色攻击一次)
+
 3. 剧本与对话 (Storytelling)
 
 发送对话
@@ -57,7 +63,9 @@ ANIM 1 Attack_Normal false   (让 1 号位角色攻击一次)
 
 示例:
 TALK 砂狼白子|对策委员会|老师，我们要去抢银行吗？
+
 TALK 阿洛娜|什亭之箱|老师，请不要在工作时间摸鱼！
+
 4. 音频系统 (Audio)
 
 播放 BGM
@@ -67,6 +75,7 @@ TALK 阿洛娜|什亭之箱|老师，请不要在工作时间摸鱼！
 说明: 异步加载并播放背景音乐，支持无缝切换
 
 示例:
+
 BGM D:\Music\Unwelcome_School.mp3
 
 停止音乐
