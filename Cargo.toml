@@ -1,6 +1,6 @@
 [package]
 name = "aefr"
-version = "0.8.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["OxidizedSchale<3997101522@qq.com>"]
 description = "AEFR's Eternal Freedom & Rust-rendered - A high-performance, open-source editor for Blue Archive fan-content."
@@ -16,25 +16,30 @@ name = "aefr"
 path = "src/main.rs"
 
 [dependencies]
-# GUI & WGPU
 eframe = { version = "0.27", features = ["wgpu", "persistence", "android-game-activity"] }
 egui = "0.27"
 egui_extras = { version = "0.27", features = ["all_loaders"] }
-
-# 图像处理
 image = { version = "0.25", features = ["jpeg", "png", "webp"] }
-
-# Spine 动画 (核心)
 rusty_spine = "0.8"
-
-# 并行计算 (多核加速)
 rayon = "1.10"
-
-# 【新增】跨平台音频播放库
 rodio = { version = "0.19", features = ["wav", "vorbis", "mp3"] }
-
-# 序列化
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 安卓特定依赖
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.5", features = ["game-activity"] }
+
+# === 修复点：将 rfd 和 tokio 设置为仅限桌面端使用 ===
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tokio = { version = "1.37", features = ["full"] }
+rfd = "0.14" # 文件选择器不在 Android 编译
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = trueserde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # 安卓特定依赖
