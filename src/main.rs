@@ -1,5 +1,5 @@
 /*
- *Project: AEFR (AEFR's Eternal Freedom & Rust-rendered)
+ * Project: AEFR (AEFR's Eternal Freedom & Rust-rendered)
  * GitHub: https://github.com/OxidizedSchale/AEFR-s-Eternal-Freedom-Rust-rendered
  *
  * 版权所有 (C) 2026 OxidizedSchale & AEFR Contributors
@@ -26,106 +26,53 @@
  * - Windows / Linux / macOS (原生桌面应用)
  * - Android Termux (X11/Wayland 环境)
  * - Android APK (原生应用打包)
+ *
  */
 
-// 全局禁用 rust 的傻逼警告
+// 全局禁用 rust 的大傻逼警告
 #![allow(warnings)]
 
-// --- 依赖导入 ---
 use eframe::egui;
 use egui::{
     epaint::Vertex, Color32, FontData, FontDefinitions, FontFamily, Mesh, Pos2, Rect, Shape,
-    TextureHandle, TextureId, Vec2,
+    TextureHandle, TextureId, Vec2, Stroke,
 };
-use rayon::prelude::*;
+use rayon::prelude::*; // 并行计算库
 use rusty_spine::{
     AnimationState, AnimationStateData, Atlas, Skeleton, SkeletonJson, Slot, Physics,
 };
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender}; // 多线程通信通道
 use std::thread;
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::Arc; // 原子引用计数，用于线程间共享数据
+use rodio::Source;
 
 // ============================================================================
-// 1. 绅士调度器 (The Gentleman Scheduler)
+// 主函数入口与跨平台适配
 // ============================================================================
 
-/// **[调度器核心]**
-/// 默认的 Rayon 线程池会贪婪地占用所有 CPU 核心。
-/// 在移动设备上，这会导致 UI 线程（主线程）和音频线程被抢占，造成卡顿和爆音。
-///
-/// 本调度器采用 "N-2 策略"：永远保留至少 2 个核心给操作系统、UI 和音频。
-struct AefrScheduler {
-    /// 专用的计算线程池，与 UI 线程物理隔离
-    pool: rayon::ThreadPool,
-    /// 实际工作的计算线程数
-    worker_count: usize,
-}
-
-impl AefrScheduler {
-    fn new() -> Self {
-        // 获取设备物理/逻辑核心数
-        let logic_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        
-        // 策略逻辑：
-        // - 核心 1: OS & Audio (高优先级)
-        // - 核心 2: UI Render Loop (主线程)
-        // - 剩余核心: Rayon Spine Calculation (计算密集型)
-        let worker_count = if logic_cores > 2 { logic_cores - 2 } else { 1 };
-
-        // 构建专用线程池
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_count)
-            .thread_name(|idx| format!("aefr-calc-{}", idx))
-            // 增加栈大小以应对复杂的递归骨骼计算
-            .stack_size(4 * 1024 * 1024) 
-            .build()
-            .expect("Failed to initialize AEFR Scheduler");
-
-        println!("[Scheduler] Initialized. Cores: Total {}, Workers {}", logic_cores, worker_count);
-
-        Self { pool, worker_count }
-    }
-
-    /// 在受限的线程池中执行闭包
-    /// 任何在该闭包内调用的 `par_iter` 都会被限制在 `pool` 中，不会溢出到主线程。
-    fn run_parallel<OP>(&self, op: OP)
-    where
-        OP: FnOnce() + Send,
-    {
-        self.pool.install(op);
-    }
-}
-
-// ============================================================================
-// 2. 智能跨平台入口 (Smart Entry Points)
-// ============================================================================
-
-// [场景 A] 桌面端 (Windows, macOS, Linux)
-// 使用标准的 native 运行模式
+// 非 Android 平台的主入口
 #[cfg(not(target_os = "android"))]
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
+            .with_inner_size([1280.0, 720.0]) // 设置窗口初始大小
             .with_title("AEFR - OxidizedSchale Edition"),
+        vsync: true, // 开启垂直同步
         ..Default::default()
     };
+    // 运行 eframe 应用
     eframe::run_native("AEFR_App", options, Box::new(|cc| Box::new(AefrApp::new(cc))))
 }
 
-// [场景 B] Termux (Android Linux 环境)
-// Termux 虽然内核是 Android，但用户通常希望通过 X11/Wayland 运行窗口。
-// 此时没有 android_activity 上下文，按桌面模式处理。
+// Android 平台的主入口
 #[cfg(target_os = "android")]
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions::default();
     eframe::run_native("AEFR_App", options, Box::new(|cc| Box::new(AefrApp::new(cc))))
 }
 
-// [场景 C] Android 原生 APK
-// 当通过 cargo-apk 或 xbuild 打包时，系统会调用此入口。
-// 必须接收 `AndroidApp` 上下文以处理生命周期事件。
+// Android Activity 入口点（供 NDK 调用）
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: android_activity::AndroidApp) {
@@ -134,514 +81,742 @@ fn android_main(app: android_activity::AndroidApp) {
 }
 
 // ============================================================================
-// 3. 异步指令系统 (Command System)
+// 通信与调度
 // ============================================================================
 
-/// 应用程序内部的消息总线。
-/// 用于解耦 UI 线程和后台加载线程，避免 IO 操作阻塞渲染循环。
-#[derive(Debug)]
+// 自定义线程池调度器，用于管理并行计算任务
+struct AefrScheduler { pool: rayon::ThreadPool }
+impl AefrScheduler {
+    fn new() -> Self {
+        // 获取逻辑核心数，并预留2个核心给UI和音频线程
+        let logic_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let worker_count = if logic_cores > 2 { logic_cores - 2 } else { 1 };
+        Self { pool: rayon::ThreadPoolBuilder::new().num_threads(worker_count).build().unwrap() }
+    }
+    // 在线程池中运行并行任务
+    fn run_parallel<OP>(&self, op: OP) where OP: FnOnce() + Send { self.pool.install(op); }
+}
+
+// 应用内部命令枚举，用于跨线程通信
 enum AppCommand {
-    /// 设置对话框内容
-    Dialogue { name: String, affiliation: String, content: String },
-    
-    /// 请求异步加载资源 (槽位索引, 文件路径)
-    RequestLoad { slot_idx: usize, path: String },
-    
-    /// 资源加载完成回调 (包含构建好的 Spine 对象和可用动画列表)
-    LoadSuccess(usize, Box<SpineObject>, Vec<String>),
-    
-    /// 异步加载背景图
-    LoadBackground(String),
-    
-    /// 播放 BGM (路径)
-    PlayBgm(String),
-    
-    /// BGM 数据预读完成 (二进制数据)
-    BgmReady(Vec<u8>), 
-    
-    /// 停止播放 BGM
-    StopBgm,
-    
-    /// 切换角色动画 (槽位, 动画名, 是否循环)
-    SetAnimation { slot_idx: usize, anim_name: String, loop_anim: bool },
-    
-    /// 控制台日志输出
-    Log(String),
+    Dialogue { name: String, affiliation: String, content: String }, // 显示对话
+    RequestLoad { slot_idx: usize, path: String }, // 请求加载 Spine 资源
+    LoadSuccess(usize, Box<SpineObject>, egui::ColorImage, String, Vec<String>), // 加载成功回调
+    LoadBackground(String), // 请求加载背景图片
+    LoadBackgroundSuccess(egui::ColorImage), // 背景加载成功回调
+    PlayBgm(String), // 播放背景音乐
+    PlaySe(String), // 播放音效
+    AudioReady(Vec<u8>, bool), // 音频数据准备就绪 (数据, 是否为BGM)
+    StopBgm, // 停止背景音乐
+    SetAnimation { slot_idx: usize, anim_name: String, loop_anim: bool }, // 设置动画
+    Log(String), // 日志消息
 }
 
 // ============================================================================
-// 4. 音频管理器 (Audio Manager)
+// 音频管理
 // ============================================================================
 
-/// 基于 rodio 的简单音频管理器
+// 音频管理器，封装 rodio 的音频流和音轨
 struct AudioManager {
-    _stream: rodio::OutputStream,
-    _stream_handle: rodio::OutputStreamHandle,
-    sink: rodio::Sink,
+    _stream: rodio::OutputStream, // 保持音频流存活
+    _stream_handle: rodio::OutputStreamHandle, // 音频流句柄
+    bgm_sink: rodio::Sink, // 背景音乐音轨
+    se_sink: rodio::Sink, // 音效音轨
 }
 
 impl AudioManager {
+    // 尝试初始化音频系统
     fn new() -> Option<Self> {
-        // 尝试获取默认音频输出设备
         let (_stream, stream_handle) = rodio::OutputStream::try_default().ok()?;
-        let sink = rodio::Sink::try_new(&stream_handle).ok()?;
-        Some(Self { _stream, _stream_handle: stream_handle, sink })
+        let bgm_sink = rodio::Sink::try_new(&stream_handle).ok()?;
+        let se_sink = rodio::Sink::try_new(&stream_handle).ok()?;
+        Some(Self { _stream, _stream_handle: stream_handle, bgm_sink, se_sink })
     }
-
-    fn play(&self, data: Vec<u8>) {
-        // 使用 Cursor 在内存中读取音频数据，避免持有文件句柄
+    
+    // 播放背景音乐（循环）
+    fn play_bgm(&self, data: Vec<u8>) {
         let cursor = Cursor::new(data);
         if let Ok(source) = rodio::Decoder::new(cursor) {
-            self.sink.stop(); // 简单的单轨播放逻辑：切歌先停
-            self.sink.append(source);
-            self.sink.play();
+            self.bgm_sink.stop(); // 停止当前BGM
+            self.bgm_sink.append(source.repeat_infinite()); // 设置循环播放
+            self.bgm_sink.play();
         }
     }
 
-    fn stop(&self) { self.sink.stop(); }
-}
-
-// ============================================================================
-// 5. Spine 渲染核心 (Spine Rendering Engine)
-// ============================================================================
-
-/// 封装后的 Spine 对象。
-/// 实现了 `Send` trait 以便在 Rayon 线程池中并行计算。
-pub struct SpineObject {
-    skeleton: Skeleton,
-    state: AnimationState,
-    _texture: TextureHandle, // 保持 GPU 纹理存活
-    texture_id: TextureId,   // 用于 egui 绘制命令
-    pub position: Pos2,      // 屏幕位置
-    pub scale: f32,          // 缩放比例
-    // 保留 SkeletonData 用于后续查询动画名称
-    skeleton_data: Arc<rusty_spine::SkeletonData>, 
-}
-
-impl std::fmt::Debug for SpineObject {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpineObject").field("pos", &self.position).finish()
+    // 播放音效（单次）
+    fn play_se(&self, data: Vec<u8>) {
+        let cursor = Cursor::new(data);
+        if let Ok(source) = rodio::Decoder::new(cursor) {
+            self.se_sink.append(source);
+            self.se_sink.play();
+        }
     }
+
+    fn stop_bgm(&self) { self.bgm_sink.stop(); } // 停止背景音乐
 }
 
-// 安全声明：rusty_spine 底层是 C 指针，但在 Rust 封装层我们保证线程安全
+// ============================================================================
+// Spine 核心对象
+// ============================================================================
+
+// Spine 动画对象，包含骨骼、状态、纹理等信息
+pub struct SpineObject {
+    skeleton: Skeleton, // 骨骼数据
+    state: AnimationState, // 动画状态机
+    _texture: Option<TextureHandle>, // 纹理句柄（用于保持所有权）
+    texture_id: Option<TextureId>,   // 纹理 ID（用于渲染）
+    pub position: Pos2, // 在屏幕上的位置
+    pub scale: f32, // 缩放比例
+    skeleton_data: Arc<rusty_spine::SkeletonData>, // 共享的骨骼数据
+}
+// 标记为 Send，允许在线程间传递
 unsafe impl Send for SpineObject {}
 
 impl SpineObject {
-    /// **[异步加载器]**
-    /// 在后台线程运行，负责 IO 读取、纹理上传和 Spine 数据解析。
-    /// 返回构造好的对象和该角色包含的所有动画名称列表。
-    fn load_async(ctx: &egui::Context, path_str: &str) -> Option<(Self, Vec<String>)> {
+    // 异步加载 Spine 资源（不涉及 GPU 纹理上传）
+    fn load_async_no_gpu(path_str: &str) -> Result<(Self, egui::ColorImage, String, Vec<String>), String> {
         let atlas_path = std::path::Path::new(path_str);
+        // 1. 解析 .atlas 文件
+        let atlas = Arc::new(Atlas::new_from_file(atlas_path).map_err(|_| "Failed to parse .atlas file")?);
         
-        // 1. 加载 Atlas (图集)
-        let atlas = Arc::new(Atlas::new_from_file(atlas_path).ok()?);
+        // 2. 获取图集第一页（通常只有一页）并加载对应图片
+        let page = atlas.pages().next().ok_or("Atlas has no pages")?;
+        let page_name = page.name().to_string();
+        let img_path = atlas_path.parent().unwrap().join(&page_name);
         
-        // 2. 加载纹理并上传至 GPU
-        // 注意：egui Context 是线程安全的，可以在后台线程 load_texture
-        let (texture_handle, texture_id) = if let Some(page) = atlas.pages().next() {
-            let img_path = atlas_path.parent()?.join(page.name());
-            let img = image::open(&img_path).ok()?;
-            let size = [img.width() as usize, img.height() as usize];
-            let rgba8 = img.to_rgba8();
-            let c_img = egui::ColorImage::from_rgba_unmultiplied(size, rgba8.as_raw());
-            let h = ctx.load_texture(page.name(), c_img, egui::TextureOptions::LINEAR);
-            let id = h.id();
-            (h, id)
-        } else { return None; };
+        let img = image::open(&img_path).map_err(|_| format!("Cannot find image: {}", page_name))?;
+        let size = [img.width() as usize, img.height() as usize];
+        let rgba8 = img.to_rgba8();
+        // 将图片数据转换为 egui 可用的格式
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba8.as_raw());
 
-        // 3. 加载 Skeleton (骨骼数据)
+        // 3. 解析 .json 骨骼文件
         let json_path = atlas_path.with_extension("json");
-        let skeleton_json = SkeletonJson::new(atlas);
-        let skeleton_data = Arc::new(skeleton_json.read_skeleton_data_file(json_path).ok()?);
+        let skeleton_json = SkeletonJson::new(atlas.clone());
+        
+        // Dirty Upgrade Script: 尝试将 Spine 3.8.x 数据升级到 4.1.x 格式
+        let mut skeleton_data_opt = None;
+        if let Ok(json_str) = std::fs::read_to_string(&json_path) {
+            let mut hacked_json = json_str.replace("\"spine\":\"3.8.", "\"spine\":\"4.1.");
+            hacked_json = hacked_json.replace("\"spine\": \"3.8.", "\"spine\": \"4.1.");
+            if let Ok(data) = skeleton_json.read_skeleton_data(hacked_json.as_bytes()) {
+                skeleton_data_opt = Some(Arc::new(data));
+            }
+        }
+        
+        // 如果升级失败，尝试直接加载原文件
+        let skeleton_data = match skeleton_data_opt {
+            Some(data) => data,
+            None => {
+                Arc::new(skeleton_json.read_skeleton_data_file(&json_path).map_err(|e| {
+                    format!("Spine Ver Error: {}", e)
+                })?)
+            }
+        };
+
+        // 4. 创建动画状态和数据
         let state_data = Arc::new(AnimationStateData::new(skeleton_data.clone()));
         let mut state = AnimationState::new(state_data);
 
-        // 4. 提取动画列表
+        // 收集所有动画名称
         let anim_names: Vec<String> = skeleton_data.animations().map(|a| a.name().to_string()).collect();
-        
         // 默认播放第一个动画
         if let Some(anim) = skeleton_data.animations().next() { 
             let _ = state.set_animation(0, &anim, true); 
         }
 
+        // 5. 创建并返回 Spine 对象
         let obj = Self {
             skeleton: Skeleton::new(skeleton_data.clone()),
             state,
-            _texture: texture_handle,
-            texture_id,
-            position: Pos2::new(0.0, 0.0),
-            scale: 0.5,
+            _texture: None,
+            texture_id: None,
+            position: Pos2::new(0.0, 0.0), // 初始位置
+            scale: 0.5, // 初始缩放
             skeleton_data,
         };
-        Some((obj, anim_names))
+        Ok((obj, color_image, page_name, anim_names))
     }
-    
-    /// 按名称切换动画
+
+    // 通过名称设置当前播放的动画
     fn set_animation_by_name(&mut self, anim_name: &str, loop_anim: bool) -> bool {
         if let Some(anim) = self.skeleton_data.animations().find(|a| a.name() == anim_name) {
             let _ = self.state.set_animation(0, &anim, loop_anim);
             true
-        } else { false }
+        } else { false } // 未找到动画
     }
-
-    /// **[并行更新]**
-    /// 计算骨骼变换。此函数将在 Rayon 线程池中运行。
+    
+    // 并行更新动画状态（在调度器线程池中调用）
     fn update_parallel(&mut self, dt: f32) {
-        self.state.update(dt);
-        let _ = self.state.apply(&mut self.skeleton);
-        self.skeleton.update_world_transform(Physics::None); // v0.8 暂时禁用物理以提升性能
+        self.state.update(dt); // 更新动画时间
+        let _ = self.state.apply(&mut self.skeleton); // 将状态应用到骨骼
+        self.skeleton.update_world_transform(Physics::None); // 更新骨骼世界变换
     }
 
-    /// **[渲染管线]**
-    /// 将计算好的骨骼数据转换为 egui 可识别的 Mesh (顶点+索引)。
+    // 将当前帧的 Spine 骨骼渲染到 egui Mesh
     fn paint(&self, ui: &mut egui::Ui) {
-        let mut mesh = Mesh::with_texture(self.texture_id);
-        // 预分配顶点缓冲区，避免频繁内存重分配
-        let mut world_vertices = Vec::with_capacity(1024);
-        
-        for slot in self.skeleton.draw_order() {
-            if let Some(attachment) = slot.attachment() {
-                // 处理 Region (静态图块)
-                if let Some(region) = attachment.as_region() {
-                    unsafe {
-                        if world_vertices.len() < 8 { world_vertices.resize(8, 0.0); }
-                        region.compute_world_vertices(&*slot, &mut world_vertices, 0, 2);
-                        self.push_to_mesh(&mut mesh, &world_vertices[0..8], &region.uvs(), &[0, 1, 2, 2, 3, 0], &*slot, region.color());
-                    }
-                } 
-                // 处理 Mesh (自由变形网格)
-                else if let Some(mesh_att) = attachment.as_mesh() {
-                    unsafe {
-                        let len = mesh_att.world_vertices_length() as usize;
-                        if world_vertices.len() < len { world_vertices.resize(len, 0.0); }
-                        mesh_att.compute_world_vertices(&*slot, 0, len as i32, &mut world_vertices, 0, 2);
-                        let uvs = std::slice::from_raw_parts(mesh_att.uvs(), len);
-                        let tris = std::slice::from_raw_parts(mesh_att.triangles(), mesh_att.triangles_count() as usize);
-                        self.push_to_mesh(&mut mesh, &world_vertices[0..len], uvs, tris, &*slot, mesh_att.color());
+        if let Some(tex_id) = self.texture_id {
+            let mut mesh = Mesh::with_texture(tex_id); // 创建带纹理的网格
+            let mut world_vertices = Vec::with_capacity(1024); // 预分配顶点缓冲区
+            
+            // 遍历绘制顺序中的每个插槽（Slot）
+            for slot in self.skeleton.draw_order() {
+                if let Some(attachment) = slot.attachment() {
+                    if let Some(region) = attachment.as_region() { // 处理区域附件（简单四边形）
+                        unsafe {
+                            // 确保顶点缓冲区足够大
+                            if world_vertices.len() < 8 { world_vertices.resize(8, 0.0); }
+                            // 计算附件在世界空间中的顶点坐标
+                            region.compute_world_vertices(&*slot, &mut world_vertices, 0, 2);
+                            // 将顶点和索引推入网格
+                            self.push_to_mesh(&mut mesh, &world_vertices[0..8], &region.uvs(), &[0, 1, 2, 2, 3, 0], &*slot, region.color());
+                        }
+                    } else if let Some(mesh_att) = attachment.as_mesh() { // 处理网格附件（复杂多边形）
+                        unsafe {
+                            let len = mesh_att.world_vertices_length() as usize;
+                            if world_vertices.len() < len { world_vertices.resize(len, 0.0); }
+                            mesh_att.compute_world_vertices(&*slot, 0, len as i32, &mut world_vertices, 0, 2);
+                            let uvs = std::slice::from_raw_parts(mesh_att.uvs(), len);
+                            let tris = std::slice::from_raw_parts(mesh_att.triangles(), mesh_att.triangles_count() as usize);
+                            self.push_to_mesh(&mut mesh, &world_vertices[0..len], uvs, tris, &*slot, mesh_att.color());
+                        }
                     }
                 }
             }
+            // 将构建好的网格添加到 UI 绘制器中
+            ui.painter().add(Shape::mesh(mesh));
         }
-        ui.painter().add(Shape::mesh(mesh));
     }
 
-    /// 辅助函数：将顶点压入 Mesh 并执行坐标系转换 (Spine -> Screen)
+    // 辅助函数：将顶点、UV、颜色等信息推入 egui Mesh
     fn push_to_mesh(&self, mesh: &mut Mesh, w_v: &[f32], uvs: &[f32], tris: &[u16], slot: &Slot, att_c: rusty_spine::Color) {
-        let s_c = slot.color();
-        // 计算预乘 Alpha 颜色 (Premultiplied Alpha)
+        let s_c = slot.color(); // 插槽颜色（用于 tint）
+        // 计算最终顶点颜色（插槽颜色 * 附件颜色）
         let color = Color32::from_rgba_premultiplied(
             (s_c.r * att_c.r * 255.0) as u8, (s_c.g * att_c.g * 255.0) as u8,
             (s_c.b * att_c.b * 255.0) as u8, (s_c.a * att_c.a * 255.0) as u8,
         );
-        let idx_offset = mesh.vertices.len() as u32;
-        let count = usize::min(uvs.len() / 2, w_v.len() / 2);
+        let count = usize::min(uvs.len() / 2, w_v.len() / 2); // 顶点数量
+        let idx_offset = mesh.vertices.len() as u32; // 当前网格的顶点起始索引
         
+        // 添加顶点
         for i in 0..count {
-            // 坐标变换：Y 轴翻转 + 缩放 + 平移
-            let pos = Pos2::new(
-                w_v[i*2] * self.scale + self.position.x,
-                -w_v[i*2+1] * self.scale + self.position.y
-            );
+            // 应用缩放和位移，Y轴取反（屏幕坐标系与 Spine 坐标系不同）
+            let pos = Pos2::new(w_v[i*2] * self.scale + self.position.x, -w_v[i*2+1] * self.scale + self.position.y);
             mesh.vertices.push(Vertex { pos, uv: Pos2::new(uvs[i*2], uvs[i*2+1]), color });
         }
+        // 添加三角形索引
         for &idx in tris { mesh.indices.push(idx_offset + idx as u32); }
     }
 }
 
 // ============================================================================
-// 6. 应用主程序 (Main Application)
+// 应用主逻辑
 // ============================================================================
 
+// 应用主状态结构体
 struct AefrApp {
+    // 调度与 UI 状态
     scheduler: AefrScheduler,
-
-    // 剧情状态
-    current_name: String,
-    current_affiliation: String,
+    is_auto_enabled: bool, // 自动播放模式
+    show_dialogue: bool, // 是否显示对话框
+    current_name: String, // 当前说话角色名
+    current_affiliation: String, // 当前角色所属
+    target_chars: Vec<char>, // 目标文本字符数组
+    visible_count: usize, // 已显示的字符数（用于打字机效果）
+    type_timer: f32, // 打字效果计时器
     
-    // 打字机效果 (Typewriter Effect)
-    target_chars: Vec<char>, // 目标完整文本
-    visible_count: usize,    // 当前显示字数
-    type_timer: f32,
-    type_speed: f32,         // 打字速度 (秒/字)
+    // 创作者面板/控制台状态
+    console_open: bool, // 控制台是否打开
+    selected_slot: usize, // 当前选中的角色槽位 (0-4)
+    input_name: String, // 对话名字输入框
+    input_aff: String, // 对话所属输入框
+    input_content: String, // 对话内容输入框
+    console_input: String, // 控制台命令行输入
+    console_logs: Vec<String>, // 控制台日志
 
-    // 资源槽位 (0-4)
-    characters: Vec<Option<SpineObject>>,
-    background: Option<TextureHandle>,
-    
-    // 系统模块
-    audio_manager: Option<AudioManager>,
-    tx: Sender<AppCommand>,
-    rx: Receiver<AppCommand>,
-
-    // 调试控制台
-    console_open: bool,
-    console_input: String,
-    console_logs: Vec<String>,
+    // 资源管理
+    characters: Vec<Option<SpineObject>>, // 5个角色槽位
+    background: Option<TextureHandle>, // 背景纹理
+    audio_manager: Option<AudioManager>, // 音频管理器
+    tx: Sender<AppCommand>, // 命令发送通道
+    rx: Receiver<AppCommand>, // 命令接收通道
 }
 
 impl AefrApp {
+    // 应用初始化
     fn new(cc: &eframe::CreationContext) -> Self {
-        setup_custom_fonts(&cc.egui_ctx);
-        egui_extras::install_image_loaders(&cc.egui_ctx);
-        let (tx, rx) = channel();
+        setup_embedded_font(&cc.egui_ctx); // 设置嵌入字体
+        egui_extras::install_image_loaders(&cc.egui_ctx); // 安装图片加载器
+        let (tx, rx) = channel(); // 创建跨线程通信通道
         
-        // 启动调度器
-        let scheduler = AefrScheduler::new();
-
-        // 尝试初始化音频设备，失败不崩溃
+        // 初始化音频管理器
         let audio_manager = match AudioManager::new() {
             Some(mgr) => Some(mgr),
-            None => { println!("Audio init failed, running in silent mode."); None }
+            None => { println!("Audio init failed"); None }
         };
 
         Self {
-            scheduler,
-            current_name: "System".into(),
-            current_affiliation: "AEFR".into(),
-            target_chars: "AEFR v0.8 Scheduler Online.\nReady for orders.".chars().collect(),
+            scheduler: AefrScheduler::new(),
+            is_auto_enabled: false,
+            show_dialogue: false,
+            current_name: "".into(),
+            current_affiliation: "".into(),
+            target_chars: vec![],
             visible_count: 0, 
             type_timer: 0.0,
-            type_speed: 0.03, // 30ms 一个字
-            characters: (0..5).map(|_| None).collect(),
+            
+            console_open: false,
+            selected_slot: 0,
+            input_name: "Sensei".into(), // 默认名字
+            input_aff: "夏莱".into(), // 默认所属
+            input_content: "喂...这不好玩...!\n又是哪个调皮鬼在戏弄我？".into(), // 默认对话
+            console_input: String::new(), 
+            console_logs: vec!["[系统] AEFR 终端已就绪。".into(), "等待指令...".into()],
+            
+            characters: (0..5).map(|_| None).collect(), // 初始化5个空槽位
             background: None,
             audio_manager,
             tx, rx,
-            console_open: false,
-            console_input: String::new(),
-            console_logs: vec!["Scheduler ready.".into()],
         }
     }
 
-    /// 解析控制台输入并派发指令
-    fn parse_and_send_command(&mut self) {
-        let input = self.console_input.trim().to_owned();
+    // 解析并发送控制台命令
+    fn parse_and_send_command(&mut self, input: &str) {
+        let input = input.trim().to_owned();
         if input.is_empty() { return; }
-        self.console_logs.push(format!("> {}", input));
+        self.console_logs.push(format!("> {}", input)); // 回显命令
 
         let tx = self.tx.clone();
+        let cmd_upper = input.to_uppercase(); // 转换为大写以进行不区分大小写的匹配
         
-        // --- 简单指令解析器 ---
-        if let Some(rest) = input.strip_prefix("LOAD ") {
-            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+        // 解析 LOAD 命令: LOAD <槽位索引> <文件路径>
+        if cmd_upper.starts_with("LOAD ") {
+            let parts: Vec<&str> = input.splitn(2, ' ').collect();
             if parts.len() == 2 {
-                if let Ok(idx) = parts[0].parse::<usize>() {
-                    tx.send(AppCommand::RequestLoad { slot_idx: idx, path: parts[1].replace("\"", "") }).ok();
+                if let Ok(idx) = parts[0][5..].trim().parse::<usize>() {
+                   tx.send(AppCommand::RequestLoad { slot_idx: idx, path: parts[1].replace("\"", "") }).ok();
                 }
             }
-        } else if let Some(rest) = input.strip_prefix("ANIM ") {
-            // 格式: ANIM <slot> <name> [loop=true]
-            let parts: Vec<&str> = rest.split_whitespace().collect();
+        } 
+        // 解析 ANIM 命令: ANIM <槽位索引> <动画名称> [是否循环]
+        else if cmd_upper.starts_with("ANIM ") {
+            let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() >= 2 {
-                if let Ok(idx) = parts[0].parse::<usize>() {
-                    let anim_name = parts[1].to_string();
-                    let loop_anim = parts.get(2).map(|s| *s == "true").unwrap_or(true);
+                if let Ok(idx) = parts[1].parse::<usize>() {
+                    let anim_name = parts[2].to_string();
+                    let loop_anim = parts.get(3).map(|s| s.to_lowercase() == "true").unwrap_or(true);
                     tx.send(AppCommand::SetAnimation { slot_idx: idx, anim_name, loop_anim }).ok();
                 }
             }
-        } else if let Some(path) = input.strip_prefix("BGM ") {
-             tx.send(AppCommand::PlayBgm(path.replace("\"", ""))).ok();
-        } else if input.eq_ignore_ascii_case("STOP") {
+        } 
+        // 解析 BGM 命令: BGM <音频文件路径>
+        else if cmd_upper.starts_with("BGM ") {
+             let path = input[4..].trim().replace("\"", "");
+             tx.send(AppCommand::PlayBgm(path)).ok();
+        } 
+        // 解析 SE 命令: SE <音频文件路径>
+        else if cmd_upper.starts_with("SE ") {
+             let path = input[3..].trim().replace("\"", "");
+             tx.send(AppCommand::PlaySe(path)).ok();
+        } 
+        // 解析 STOP 命令: STOP (停止 BGM)
+        else if cmd_upper == "STOP" {
              tx.send(AppCommand::StopBgm).ok();
-        } else if let Some(rest) = input.strip_prefix("TALK ") {
+        } 
+        // 解析 TALK 命令: TALK <名字>|<所属>|<内容>
+        else if cmd_upper.starts_with("TALK ") {
+            let rest = &input[5..];
             let p: Vec<&str> = rest.split('|').collect();
             if p.len() == 3 {
                 tx.send(AppCommand::Dialogue { name: p[0].to_owned(), affiliation: p[1].to_owned(), content: p[2].to_owned() }).ok();
             }
-        } else if let Some(path) = input.strip_prefix("BG ") {
-            tx.send(AppCommand::LoadBackground(path.replace("\"", ""))).ok();
-        } else if input.eq_ignore_ascii_case("HELP") {
-            self.console_logs.push("Commands: LOAD, ANIM, BGM, BG, TALK".into());
+        } 
+        // 解析 BG 命令: BG <图片文件路径>
+        else if cmd_upper.starts_with("BG ") {
+            let path = input[3..].trim().replace("\"", "");
+            tx.send(AppCommand::LoadBackground(path)).ok();
+        } 
+        // 帮助命令
+        else if cmd_upper == "HELP" {
+            self.console_logs.push("可用指令: LOAD, ANIM, BGM, SE, BG, TALK".into());
         }
-        self.console_input.clear();
     }
 
-    /// 处理异步事件回调
+    // 处理异步事件（从其他线程接收到的命令）
     fn handle_async_events(&mut self, ctx: &egui::Context) {
-        while let Ok(cmd) = self.rx.try_recv() {
+        while let Ok(cmd) = self.rx.try_recv() { // 尝试接收所有待处理命令
             match cmd {
                 AppCommand::Dialogue { name, affiliation, content } => { 
+                    // 设置对话内容，并初始化打字机效果
                     self.current_name = name; 
                     self.current_affiliation = affiliation; 
                     self.target_chars = content.chars().collect();
-                    self.visible_count = 0; // 重置打字机
+                    self.visible_count = 0;
+                    self.show_dialogue = true;
                 }
-                AppCommand::Log(msg) => self.console_logs.push(msg),
+                AppCommand::Log(msg) => self.console_logs.push(msg), // 添加日志
                 AppCommand::RequestLoad { slot_idx, path } => {
+                    // 在后台线程加载 Spine 资源
                     let tx_cb = self.tx.clone();
-                    let ctx_clone = ctx.clone();
-                    self.console_logs.push(format!("Loading slot {}...", slot_idx));
-                    
-                    // 派发到后台线程
+                    self.console_logs.push(format!("[忙碌] 正在解析 Spine: {}", path));
                     thread::spawn(move || {
-                        if let Some((obj, anims)) = SpineObject::load_async(&ctx_clone, &path) {
-                            tx_cb.send(AppCommand::LoadSuccess(slot_idx, Box::new(obj), anims)).ok();
-                        } else {
-                            tx_cb.send(AppCommand::Log(format!("Load failed: {}", path))).ok();
+                        match SpineObject::load_async_no_gpu(&path) {
+                            Ok((obj, color_image, page_name, anims)) => {
+                                // 加载成功，传回主线程
+                                tx_cb.send(AppCommand::LoadSuccess(slot_idx, Box::new(obj), color_image, page_name, anims)).ok();
+                            },
+                            Err(e) => {
+                                tx_cb.send(AppCommand::Log(format!("[错误] 载入失败: {}", e))).ok();
+                            }
                         }
                     });
                 }
-                AppCommand::LoadSuccess(idx, obj, anims) => {
+                AppCommand::LoadSuccess(idx, obj, color_image, page_name, anims) => {
+                    // 在主线程中完成纹理上传和对象设置
                     if let Some(slot) = self.characters.get_mut(idx) {
                         let mut loaded = *obj;
-                        // 简单的自动排版逻辑
-                        loaded.position = Pos2::new(200.0 + idx as f32 * 220.0, 720.0);
+                        // 将图片数据上传到 GPU 纹理
+                        let handle = ctx.load_texture(page_name, color_image, egui::TextureOptions::LINEAR);
+                        loaded.texture_id = Some(handle.id());
+                        loaded._texture = Some(handle); // 保持纹理所有权，防止被释放
+                        // 根据槽位索引设置水平位置
+                        let x = match idx { 0 => 640.0, 1 => 400.0, 2 => 200.0, 3 => 880.0, 4 => 1080.0, _ => 640.0 };
+                        loaded.position = Pos2::new(x, 720.0); // 底部对齐
+                        loaded.scale = 0.6; // 设置缩放
                         *slot = Some(loaded);
-                        self.console_logs.push(format!("Slot {} Loaded. Anims: {}", idx, anims.len()));
+                        self.console_logs.push(format!("[成功] 槽位 {} 就绪。包含 {} 个动作。", idx, anims.len()));
                     }
                 }
+                AppCommand::LoadBackground(path) => {
+                    // 在后台线程加载背景图片
+                    let tx_cb = self.tx.clone();
+                    self.console_logs.push("[忙碌] 正在读取背景...".into());
+                    thread::spawn(move || {
+                        if let Ok(img) = image::open(&path) {
+                            let rgba = img.to_rgba8();
+                            let c_img = egui::ColorImage::from_rgba_unmultiplied([img.width() as _, img.height() as _], rgba.as_raw());
+                            tx_cb.send(AppCommand::LoadBackgroundSuccess(c_img)).ok();
+                        } else {
+                            tx_cb.send(AppCommand::Log("[错误] 图片文件损坏或不存在".into())).ok();
+                        }
+                    });
+                }
+                AppCommand::LoadBackgroundSuccess(c_img) => {
+                    // 在主线程中设置背景纹理
+                    self.background = Some(ctx.load_texture("bg", c_img, egui::TextureOptions::LINEAR));
+                    self.console_logs.push("[成功] 背景已切换。".into());
+                }
                 AppCommand::SetAnimation { slot_idx, anim_name, loop_anim } => {
+                     // 设置指定槽位角色的动画
                      if let Some(Some(char)) = self.characters.get_mut(slot_idx) {
                          if char.set_animation_by_name(&anim_name, loop_anim) {
-                             self.console_logs.push(format!("Slot {} -> {}", slot_idx, anim_name));
+                             self.console_logs.push(format!("[成功] 槽位 {} 正在播放 '{}'", slot_idx, anim_name));
                          } else {
-                             self.console_logs.push(format!("Anim not found: {}", anim_name));
+                             self.console_logs.push(format!("[警告] 动作未找到: {}", anim_name));
                          }
                      }
                 }
-                AppCommand::LoadBackground(path) => {
-                    if let Ok(img) = image::open(&path) {
-                        let rgba = img.to_rgba8();
-                        let c_img = egui::ColorImage::from_rgba_unmultiplied([img.width() as _, img.height() as _], rgba.as_raw());
-                        self.background = Some(ctx.load_texture(&path, c_img, egui::TextureOptions::LINEAR));
-                        self.console_logs.push("BG Loaded.".into());
-                    }
-                }
                 AppCommand::PlayBgm(path) => {
+                    // 在后台线程读取 BGM 文件
                     let tx_cb = self.tx.clone();
-                    // 异步读取音频文件
                     thread::spawn(move || {
                         if let Ok(data) = std::fs::read(&path) {
-                            tx_cb.send(AppCommand::BgmReady(data)).ok();
+                            tx_cb.send(AppCommand::AudioReady(data, true)).ok();
                         } else {
-                            tx_cb.send(AppCommand::Log("Audio read failed.".into())).ok();
+                            tx_cb.send(AppCommand::Log("[错误] 音频文件读取失败".into())).ok();
                         }
                     });
                 }
-                AppCommand::BgmReady(data) => {
+                AppCommand::PlaySe(path) => {
+                    // 在后台线程读取音效文件
+                    let tx_cb = self.tx.clone();
+                    thread::spawn(move || {
+                        if let Ok(data) = std::fs::read(&path) {
+                            tx_cb.send(AppCommand::AudioReady(data, false)).ok();
+                        } else {
+                            tx_cb.send(AppCommand::Log("[错误] 音效文件读取失败".into())).ok();
+                        }
+                    });
+                }
+                AppCommand::AudioReady(data, is_bgm) => {
+                    // 在主线程播放音频（音频设备操作必须在主线程）
                     if let Some(mgr) = &self.audio_manager {
-                        mgr.play(data);
-                        self.console_logs.push("Playing BGM.".into());
+                        if is_bgm { mgr.play_bgm(data); self.console_logs.push("[音频] BGM 循环播放中".into()); }
+                        else { mgr.play_se(data); self.console_logs.push("[音频] 音效已触发".into()); }
                     }
                 }
-                AppCommand::StopBgm => {
-                    if let Some(mgr) = &self.audio_manager { mgr.stop(); }
-                }
+                AppCommand::StopBgm => { if let Some(mgr) = &self.audio_manager { mgr.stop_bgm(); } } // 停止 BGM
             }
         }
     }
 }
 
+// 实现 eframe::App trait，定义应用主循环
 impl eframe::App for AefrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. 事件处理
+        // 1. 处理异步事件（命令）
         self.handle_async_events(ctx);
-        let dt = ctx.input(|i| i.stable_dt);
+        let dt = ctx.input(|i| i.stable_dt); // 获取帧间隔时间
 
-        // 2. 打字机更新
-        if self.visible_count < self.target_chars.len() {
+        // 2. 更新打字机效果
+        if self.show_dialogue && self.visible_count < self.target_chars.len() {
             self.type_timer += dt;
-            if self.type_timer > self.type_speed {
+            if self.type_timer > 0.03 { // 每0.03秒显示一个字符
                 self.visible_count += 1;
                 self.type_timer = 0.0;
-                ctx.request_repaint(); // 请求刷新以显示新字
             }
         }
 
-        // 3. Spine 并行计算 (由 Gentleman Scheduler 托管)
+        // 3. 并行更新所有角色的动画
         self.scheduler.run_parallel(|| {
             self.characters.par_iter_mut().for_each(|slot| {
-                if let Some(char) = slot { 
-                    // 计算骨骼变形
-                    char.update_parallel(dt); 
-                }
+                if let Some(char) = slot { char.update_parallel(dt); }
             });
         });
 
-        // 如果有角色，持续刷新以播放动画
-        if self.characters.iter().any(|c| c.is_some()) { ctx.request_repaint(); }
-
-        // 4. UI 绘制
+        // 4. 绘制主界面
         egui::CentralPanel::default().show(ctx, |ui| {
-            let screen_rect = ui.max_rect();
+            let screen_rect = ui.max_rect(); // 获取屏幕矩形
             
-            // 背景层
+            // 绘制背景
             if let Some(bg) = &self.background {
                 ui.painter().image(bg.id(), screen_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            } else {
+                ui.painter().rect_filled(screen_rect, 0.0, Color32::BLACK); // 默认黑色背景
             }
 
-            // 角色层
+            // 绘制所有角色
             for char in self.characters.iter().flatten() { char.paint(ui); }
+
+            // 绘制右上角按钮（AUTO, MENU）
+            draw_top_right_buttons(ui, screen_rect, &mut self.is_auto_enabled);
             
-            // 对话框层
-            let current_text: String = self.target_chars.iter().take(self.visible_count).collect();
-            // 如果点击了对话框，瞬间显示全部
-            if draw_dialogue_ui(ui, screen_rect, &self.current_name, &self.current_affiliation, &current_text) {
-                self.visible_count = self.target_chars.len();
+            // 绘制对话框
+            if self.show_dialogue {
+                let current_text: String = self.target_chars.iter().take(self.visible_count).collect();
+                // 传入打字完成状态
+                let is_finished = self.visible_count >= self.target_chars.len();
+                // 如果点击对话框，立即完成打字
+                if draw_ba_dialogue(ui, screen_rect, &self.current_name, &self.current_affiliation, &current_text, is_finished) {
+                    self.visible_count = self.target_chars.len();
+                }
             }
 
-            // 控制台按钮
-            let cmd_rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(60.0, 40.0));
+            // 绘制命令行按钮
+            let cmd_rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(60.0, 30.0));
             if ui.put(cmd_rect, egui::Button::new("CMD")).clicked() { self.console_open = !self.console_open; }
             
-            // 控制台窗口
-            if self.console_open { draw_console_window(ctx, self); }
+            // 绘制创作者面板（控制台）
+            if self.console_open { draw_creator_panel(ctx, self); }
         });
+
+        ctx.request_repaint(); // 请求下一帧重绘
     }
 }
 
 // ============================================================================
-// 7. UI 组件函数
+// UI 复刻层（模仿《蔚蓝档案》风格的UI组件）
 // ============================================================================
 
-/// 绘制对话框，返回是否被点击
-fn draw_dialogue_ui(ui: &mut egui::Ui, screen: Rect, name: &str, affiliation: &str, content: &str) -> bool {
-    let box_h = 160.0;
+// 绘制右上角的 AUTO 和 MENU 按钮
+fn draw_top_right_buttons(ui: &mut egui::Ui, screen: Rect, is_auto: &mut bool) {
+    let btn_w = 90.0; // 按钮宽度
+    let btn_h = 32.0; // 按钮高度
+    let margin = 20.0; // 边距
+    
+    // AUTO 按钮位置
+    let auto_pos = Pos2::new(screen.right() - btn_w * 2.0 - margin - 10.0, margin);
+    let auto_rect = Rect::from_min_size(auto_pos, Vec2::new(btn_w, btn_h));
+    
+    let auto_resp = ui.allocate_rect(auto_rect, egui::Sense::click());
+    if auto_resp.clicked() { *is_auto = !*is_auto; } // 切换自动播放状态
+
+    // 根据状态改变按钮颜色
+    let auto_bg = if *is_auto { Color32::from_rgb(255, 215, 0) } else { Color32::WHITE };
+    let auto_fg = Color32::from_rgb(20, 30, 50);
+
+    ui.painter().rect_filled(auto_rect, 4.0, auto_bg); // 绘制圆角矩形背景
+    ui.painter().text(auto_rect.center(), egui::Align2::CENTER_CENTER, "AUTO", egui::FontId::proportional(18.0), auto_fg);
+
+    // MENU 按钮（仅绘制，功能未实现）
+    let menu_pos = Pos2::new(screen.right() - btn_w - margin, margin);
+    let menu_rect = Rect::from_min_size(menu_pos, Vec2::new(btn_w, btn_h));
+    let _ = ui.allocate_rect(menu_rect, egui::Sense::click());
+    
+    ui.painter().rect_filled(menu_rect, 4.0, Color32::WHITE);
+    ui.painter().text(menu_rect.center(), egui::Align2::CENTER_CENTER, "MENU", egui::FontId::proportional(18.0), auto_fg);
+}
+
+// 绘制《蔚蓝档案》风格的对话框
+// 返回布尔值表示是否被点击（用于快速跳过打字效果）
+fn draw_ba_dialogue(ui: &mut egui::Ui, screen: Rect, name: &str, affiliation: &str, content: &str, is_finished: bool) -> bool {
+    let box_h = 180.0; // 对话框高度
     let box_rect = Rect::from_min_max(Pos2::new(0.0, screen.bottom() - box_h), screen.max);
     
-    // 半透明黑底
-    ui.painter().rect_filled(box_rect, 5.0, Color32::from_black_alpha(180));
+    // 绘制半透明黑色背景
+    ui.painter().rect_filled(box_rect, 0.0, Color32::from_black_alpha(200));
+    let response = ui.allocate_rect(box_rect, egui::Sense::click()); // 分配点击区域
     
-    // 透明按钮覆盖，用于检测点击
-    let response = ui.allocate_rect(box_rect, egui::Sense::click());
+    let pad_x = 100.0; // 左右内边距
     
-    // 名字标签
+    // 【关键修复】固定线条位置：顶部往下 55px (让出足够的名字高度)
+    let line_y = box_rect.top() + 55.0;
+    ui.painter().line_segment(
+        [Pos2::new(pad_x, line_y), Pos2::new(screen.right() - pad_x, line_y)],
+        Stroke::new(1.5, Color32::from_rgb(100, 120, 150)) // 分隔线
+    );
+
+    // 绘制角色名
     if !name.is_empty() {
-        let name_pos = box_rect.left_top() + Vec2::new(100.0, 20.0);
-        ui.painter().text(name_pos, egui::Align2::LEFT_TOP, format!("{} [{}]", name, affiliation), egui::FontId::proportional(22.0), Color32::WHITE);
-    }
-    
-    // 内容文本
-    ui.painter().text(box_rect.left_top() + Vec2::new(100.0, 50.0), egui::Align2::LEFT_TOP, content, egui::FontId::proportional(26.0), Color32::WHITE);
-    
-    response.clicked()
-}
-
-/// 绘制调试控制台
-fn draw_console_window(ctx: &egui::Context, app: &mut AefrApp) {
-    egui::Window::new("AEFR CONSOLE").default_size([600.0, 400.0]).show(ctx, |ui| {
-        egui::ScrollArea::vertical().stick_to_bottom(true).max_height(300.0).show(ui, |ui| {
-            for log in &app.console_logs { ui.monospace(log); }
-        });
-        ui.horizontal(|ui| {
-            if ui.text_edit_singleline(&mut app.console_input).lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                app.parse_and_send_command();
-            }
-        });
-    });
-}
-
-/// 跨平台字体加载
-fn setup_custom_fonts(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-    let paths = vec!["/system/fonts/NotoSansCJK-Regular.ttc", "C:\\Windows\\Fonts\\msyh.ttc"];
-    for p in paths {
-        if let Ok(d) = std::fs::read(p) {
-            fonts.font_data.insert("sys".into(), FontData::from_owned(d));
-            fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "sys".into());
-            ctx.set_fonts(fonts);
-            return;
+        // 名字位置上移，保证不压线
+        let name_pos = box_rect.left_top() + Vec2::new(pad_x, 15.0);
+        let name_gal = ui.painter().layout_no_wrap(name.to_string(), egui::FontId::proportional(28.0), Color32::WHITE);
+        ui.painter().galley(name_pos, name_gal.clone(), Color32::WHITE);
+        
+        // 绘制所属（在名字右侧）
+        if !affiliation.is_empty() {
+            let aff_pos = name_pos + Vec2::new(name_gal.rect.width() + 15.0, 6.0);
+            ui.painter().text(aff_pos, egui::Align2::LEFT_TOP, affiliation, egui::FontId::proportional(22.0), Color32::from_rgb(100, 200, 255));
         }
     }
+    
+    // 绘制对话内容
+    ui.painter().text(box_rect.left_top() + Vec2::new(pad_x, 80.0), egui::Align2::LEFT_TOP, content, egui::FontId::proportional(24.0), Color32::WHITE);
+    
+    // 【关键修复】只有打字结束后才显示倒三角提示符
+    if is_finished {
+        let time = ui.input(|i| i.time);
+        let offset = (time * 3.0).sin() * 3.0; // 简单的上下浮动效果
+        let tri_center = Pos2::new(screen.right() - pad_x, screen.bottom() - 30.0 + offset as f32);
+        let size = 8.0;
+        // 绘制倒三角形
+        ui.painter().add(Shape::convex_polygon(
+            vec![
+                tri_center + Vec2::new(-size, -size),
+                tri_center + Vec2::new(size, -size),
+                tri_center + Vec2::new(0.0, size),
+            ],
+            Color32::from_rgb(0, 180, 255), // 蓝色三角形
+            Stroke::NONE,
+        ));
+    }
+
+    response.clicked() // 返回是否被点击
+}
+
+// 绘制创作者面板/控制台窗口
+fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
+    let mut cmd_to_send = None; // 临时存储待发送的命令
+
+    egui::Window::new("创作者面板 (AEFR)").default_size([450.0, 500.0]).show(ctx, |ui| {
+        ui.heading("📂 资源与槽位");
+        
+        // 槽位选择
+        ui.horizontal(|ui| {
+            ui.label("当前槽位:");
+            for i in 0..5 {
+                if ui.radio_value(&mut app.selected_slot, i, format!("[{}]", i)).clicked() {
+                    app.console_logs.push(format!("[系统] 切换到槽位 {}", i));
+                }
+            }
+        });
+
+        // 文件加载按钮（桌面端）
+        ui.horizontal(|ui| {
+            #[cfg(not(target_os = "android"))]
+            {
+                if ui.button("📥 载入 Spine (到当前槽)").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Atlas", &["atlas"]).pick_file() {
+                        cmd_to_send = Some(AppCommand::RequestLoad { slot_idx: app.selected_slot, path: path.display().to_string() });
+                    }
+                }
+                if ui.button("🖼 载入背景").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg"]).pick_file() {
+                        cmd_to_send = Some(AppCommand::LoadBackground(path.display().to_string()));
+                    }
+                }
+            }
+            #[cfg(target_os = "android")]
+            { ui.label("📌 移动端: 请使用底部命令行载入文件。"); } // Android 提示
+        });
+
+        ui.separator();
+        ui.heading("🎵 音频控制");
+        ui.horizontal(|ui| {
+            #[cfg(not(target_os = "android"))]
+            {
+                if ui.button("🎼 载入 BGM (循环)").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Audio", &["mp3", "wav", "ogg"]).pick_file() {
+                        cmd_to_send = Some(AppCommand::PlayBgm(path.display().to_string()));
+                    }
+                }
+                if ui.button("🔊 载入 音效SE (单次)").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Audio", &["mp3", "wav", "ogg"]).pick_file() {
+                        cmd_to_send = Some(AppCommand::PlaySe(path.display().to_string()));
+                    }
+                }
+                if ui.button("⏹ 停止 BGM").clicked() {
+                    cmd_to_send = Some(AppCommand::StopBgm);
+                }
+            }
+        });
+
+        ui.separator();
+        ui.heading("💬 剧情对话");
+        // 对话输入表单
+        ui.horizontal(|ui| {
+            ui.label("名字:");
+            ui.add(egui::TextEdit::singleline(&mut app.input_name).desired_width(80.0));
+            ui.label("所属:");
+            ui.add(egui::TextEdit::singleline(&mut app.input_aff).desired_width(80.0));
+        });
+        ui.label("内容:");
+        ui.add(egui::TextEdit::multiline(&mut app.input_content).desired_width(f32::INFINITY));
+        
+        if ui.button("▶ 发送对话 (TALK)").clicked() {
+            cmd_to_send = Some(AppCommand::Dialogue {
+                name: app.input_name.clone(),
+                affiliation: app.input_aff.clone(),
+                content: app.input_content.clone(),
+            });
+        }
+
+        ui.separator();
+        ui.heading("⌨️ 控制台输入");
+        ui.horizontal(|ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut app.console_input).hint_text("输入 LOAD, BG, ANIM 指令..."));
+            // 点击发送按钮或按回车键发送命令
+            if ui.button("发送指令").clicked() || (response.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter))) {
+                let input = app.console_input.clone();
+                app.parse_and_send_command(&input);
+                app.console_input.clear();
+                response.request_focus(); // 保持输入框焦点
+            }
+        });
+
+        ui.separator();
+        ui.heading("📜 系统日志");
+        // 日志显示区域（自动滚动到底部）
+        egui::ScrollArea::vertical().stick_to_bottom(true).max_height(100.0).show(ui, |ui| {
+            for log in &app.console_logs { ui.label(log); }
+        });
+    });
+
+    // 在窗口外发送命令，避免借用冲突
+    if let Some(cmd) = cmd_to_send {
+        let _ = app.tx.send(cmd);
+    }
+}
+
+// 设置嵌入字体（用于跨平台字体一致性）
+fn setup_embedded_font(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    let font_bytes = include_bytes!("font.ttf"); // 从二进制嵌入字体文件
+    let font_data = FontData::from_static(font_bytes);
+    fonts.font_data.insert("my_font".to_owned(), font_data);
+    // 将自定义字体设为默认比例字体和等宽字体
+    fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "my_font".to_owned());
+    fonts.families.get_mut(&FontFamily::Monospace).unwrap().insert(0, "my_font".to_owned());
+    ctx.set_fonts(fonts);
 }
