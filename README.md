@@ -10,6 +10,87 @@ AEFR 目前并不是一个为了讨好所有人而设计的复杂应用。它只
 
 GPL3协议开源，欢迎任何人来帮忙负责开发
 
+# 开始使用（去 Release 找源码编译或者直接找没有指令集优化的二进制）
+AEFR 采用 指令驱动 (Command-Driven) 的交互方式。点击界面左上角的 [CMD] 按钮即可打开内置调试控制台。
+
+1. 场景与视觉 (Visuals)
+
+加载背景
+
+指令: BG <图片路径>
+
+说明: 瞬间切换背景图片，支持 .jpg, .png, .webp。
+
+示例:
+BG C:\Assets\BlueArchive\BG_Classroom.png
+
+装填角色 (Spine)
+
+指令: LOAD <槽位ID> <.atlas文件路径>
+
+说明: 将角色加载到指定槽位。AEFR 提供 0~4 号共 5 个槽位，支持自动排版。加载成功后，控制台会打印出该角色可用的动作列表。
+
+示例:
+LOAD 0 D:\Assets\Shiroko\Shiroko_Home.atlas
+2. 动作与演出 (Motion)
+
+切换动作
+
+指令: ANIM <槽位ID> <动作名> [是否循环]
+
+说明: 控制指定槽位角色的动作。true 为循环播放，false 为播放一次。
+
+注意: 动作名必须精确匹配（加载角色时控制台会列出可用动作）。
+
+示例:
+ANIM 0 Start_Idle_01 true    (让白子开始循环待机动作)
+ANIM 1 Attack_Normal false   (让 1 号位角色攻击一次)
+3. 剧本与对话 (Storytelling)
+
+发送对话
+
+指令: TALK <名字>|<社团/所属>|<内容>
+
+说明: 渲染标准的基沃托斯风格对话框。支持 打字机效果（点击对话框可瞬间跳过）。
+
+分隔符: 必须使用竖线 | 分隔参数。
+
+示例:
+TALK 砂狼白子|对策委员会|老师，我们要去抢银行吗？
+TALK 阿洛娜|什亭之箱|老师，请不要在工作时间摸鱼！
+4. 音频系统 (Audio)
+
+播放 BGM
+
+指令: BGM <音频路径>
+
+说明: 异步加载并播放背景音乐，支持无缝切换
+
+示例:
+BGM D:\Music\Unwelcome_School.mp3
+
+停止音乐
+
+指令: STOP
+
+说明: 立即停止当前播放的 BGM。
+
+💡 极客贴士 (Pro Tips)
+
+路径问题：
+
+Windows: 推荐直接复制文件路径，AEFR 会自动处理引号（如 "C:\Path"）
+
+Android / Termux: 请使用绝对路径，例如 /sdcard/Download/bg.png
+
+性能监控：
+
+得益于 Gentleman Scheduler (绅士调度器)，即使你填满了 5 个槽位并播放 BGM，UI 线程依然保持丝滑。请放心大胆地进行多任务操作
+
+日志反馈：
+
+所有的操作结果（成功/失败/可用动画列表）都会实时打印在控制台的 Log 区域，请留意查看
+
 # 但是，在提供帮助中，必须要遵守以下规则
 技术栈纯洁性：本项目坚持核心业务逻辑与架构 100% 使用 Rust 实现
 
@@ -73,15 +154,13 @@ GPL3协议开源，欢迎任何人来帮忙负责开发
 UI 组件必须遵循  egui  的即时模式哲学，不接受来自  React  风格的提议
 
 # 💾 获取 AEFR
-AEFR 没有在 windows 平台发布 Release 的打算
+并不推荐直接在 Release下载二进制
 
 因为我们在 .cargo/config.toml 里面已经开了windows平台下（MSVC 与 GNU）target-cpu=native，这意味着 AEFR 在编译时会根据 CPU 的指令集进行优化
 
 性能将会更上一层楼
 
-​“Release? Real hackers compile from source.”
-
-源码已发，想要测试，自己去用 cargo run --release 吧
+​“Release? Real hackers compile from source.”:-)
 
 # 联系我们：
 作者邮箱：3997101522@qq.com
