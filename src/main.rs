@@ -197,8 +197,8 @@ impl SpineObject {
         // Dirty Upgrade Script: 尝试将 Spine 3.8.x 数据升级到 4.1.x 格式
         let mut skeleton_data_opt = None;
         if let Ok(json_str) = std::fs::read_to_string(&json_path) {
-            let mut hacked_json = json_str.replace("\"spine\":\"3.8.", "\"spine\":\"4.1.");
-            hacked_json = hacked_json.replace("\"spine\": \"3.8.", "\"spine\": \"4.1.");
+            let mut hacked_json = json_str.replace("\"spine\":\"3..", "\"spine\":\"4.1.");
+            hacked_json = hacked_json.replace("\"spine\": \"3..", "\"spine\": \"4.1.");
             if let Ok(data) = skeleton_json.read_skeleton_data(hacked_json.as_bytes()) {
                 skeleton_data_opt = Some(Arc::new(data));
             }
@@ -236,6 +236,11 @@ impl SpineObject {
             skeleton_data,
         };
         Ok((obj, color_image, page_name, anim_names))
+    }
+
+    // 获取当前立绘所有的动画名称
+    pub fn get_anim_names(&self) -> Vec<String> {
+        self.skeleton_data.animations().map(|a| a.name().to_string()).collect()
     }
 
     // 通过名称设置当前播放的动画
@@ -334,6 +339,10 @@ struct AefrApp {
     input_content: String, // 对话内容输入框
     console_input: String, // 控制台命令行输入
     console_logs: Vec<String>, // 控制台日志
+    
+    // 动作预览窗口状态
+    show_anim_preview: bool, // 是否显示动作预览面板
+    preview_anim_idx: usize, // 当前正在预览的动作索引
 
     // 资源管理
     characters: Vec<Option<SpineObject>>, // 5个角色槽位
@@ -368,11 +377,14 @@ impl AefrApp {
             
             console_open: false,
             selected_slot: 0,
-            input_name: "Sensei".into(), // 默认名字
-            input_aff: "夏莱".into(), // 默认所属
-            input_content: "喂...这不好玩...!\n又是哪个调皮鬼在戏弄我？".into(), // 默认对话
+            input_name: "OxidizedSchale".into(), // 默认名字
+            input_aff: "AEFR Contributors".into(), // 默认所属
+            input_content: "AEFR 已启动\n 正在等待指令".into(), // 默认对话
             console_input: String::new(), 
             console_logs: vec!["[系统] AEFR 终端已就绪。".into(), "等待指令...".into()],
+            
+            show_anim_preview: false, // 默认隐藏预览面板
+            preview_anim_idx: 0,      // 默认动作索引
             
             characters: (0..5).map(|_| None).collect(), // 初始化5个空槽位
             background: None,
@@ -718,6 +730,7 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
             for i in 0..5 {
                 if ui.radio_value(&mut app.selected_slot, i, format!("[{}]", i)).clicked() {
                     app.console_logs.push(format!("[系统] 切换到槽位 {}", i));
+                    app.preview_anim_idx = 0; // 切换槽位时重置预览动作索引
                 }
             }
         });
@@ -739,6 +752,11 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
             }
             #[cfg(target_os = "android")]
             { ui.label("📌 移动端: 请使用底部命令行载入文件。"); } // Android 提示
+
+            // 动作预览按钮（全平台可见，摆在右侧）
+            if ui.button("🏃 预览动作").clicked() {
+                app.show_anim_preview = true;
+            }
         });
 
         ui.separator();
@@ -803,7 +821,59 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
         });
     });
 
-    // 在窗口外发送命令，避免借用冲突
+    // ================= 新增：动作预览扩展窗口 =================
+    if app.show_anim_preview {
+        egui::Window::new("动作预览与选择")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut app.show_anim_preview) // 提供自带的关闭 "X" 按钮
+            .show(ctx, |ui| {
+                if let Some(Some(char)) = app.characters.get(app.selected_slot) {
+                    let anims = char.get_anim_names();
+                    if anims.is_empty() {
+                        ui.label("⚠️ 该立绘没有可用动作或解析失败。");
+                    } else {
+                        // 防止索引越界
+                        if app.preview_anim_idx >= anims.len() {
+                            app.preview_anim_idx = 0;
+                        }
+                        let current_anim = &anims[app.preview_anim_idx];
+
+                        ui.vertical_centered(|ui| {
+                            ui.label(format!("当前槽位 [{}] 动作:", app.selected_slot));
+                            ui.heading(current_anim); // 大字显示当前动作名字
+                            ui.add_space(10.0);
+
+                            ui.horizontal(|ui| {
+                                // 左箭头按钮
+                                if ui.button("⬅ 上一个 (Prev)").clicked() {
+                                    app.preview_anim_idx = (app.preview_anim_idx + anims.len() - 1) % anims.len();
+                                    cmd_to_send = Some(AppCommand::SetAnimation {
+                                        slot_idx: app.selected_slot,
+                                        anim_name: anims[app.preview_anim_idx].clone(),
+                                        loop_anim: true,
+                                    });
+                                }
+                                
+                                // 右箭头按钮
+                                if ui.button("下一个 (Next) ➡").clicked() {
+                                    app.preview_anim_idx = (app.preview_anim_idx + 1) % anims.len();
+                                    cmd_to_send = Some(AppCommand::SetAnimation {
+                                        slot_idx: app.selected_slot,
+                                        anim_name: anims[app.preview_anim_idx].clone(),
+                                        loop_anim: true,
+                                    });
+                                }
+                            });
+                        });
+                    }
+                } else {
+                    ui.label(format!("⚠️ 槽位 [{}] 目前为空，请先载入立绘！", app.selected_slot));
+                }
+            });
+    }
+
+    // 在所有窗口布局完成后统一发送命令，避免借用冲突
     if let Some(cmd) = cmd_to_send {
         let _ = app.tx.send(cmd);
     }
