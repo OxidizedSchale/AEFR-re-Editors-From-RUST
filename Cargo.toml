@@ -1,6 +1,6 @@
 [package]
 name = "aefr"
-version = "0.1.1"
+version = "1.1.0"
 edition = "2021"
 authors = ["OxidizedSchale<3997101522@qq.com>"]
 description = "AEFR's Eternal Freedom & Rust-rendered - A high-performance, open-source editor for Blue Archive fan-content."
@@ -20,7 +20,7 @@ eframe = { version = "0.27", features = ["wgpu", "persistence", "android-game-ac
 egui = "0.27"
 egui_extras = { version = "0.27", features = ["all_loaders"] }
 image = { version = "0.25", features = ["jpeg", "png", "webp"] }
-rusty_spine = "0.8"
+rusty_spine = { git = "https://github.com/jabuwu/rusty_spine3.8" }
 rayon = "1.10"
 rodio = { version = "0.19", features = ["wav", "vorbis", "mp3"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -34,20 +34,6 @@ android-activity = { version = "0.5", features = ["game-activity"] }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tokio = { version = "1.37", features = ["full"] }
 rfd = "0.14" # 文件选择器不在 Android 编译
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-strip = trueserde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# 安卓特定依赖
-[target.'cfg(target_os = "android")'.dependencies]
-android-activity = { version = "0.5", features = ["game-activity"] }
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
-tokio = { version = "1.37", features = ["full"] }
 
 [profile.release]
 opt-level = 3
