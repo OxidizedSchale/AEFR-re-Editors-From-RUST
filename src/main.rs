@@ -559,6 +559,18 @@ impl AefrApp {
                     self.scenario.scenes[self.current_scene_idx].bgm_path = Some(path);
                 }
                 
+                // 播放音效 (新增)
+                AppCommand::PlaySe(path) => {
+                    let tx_cb = self.tx.clone();
+                    let path_clone = path.clone();
+                    thread::spawn(move || { 
+                        if let Ok(d) = std::fs::read(&path_clone) { 
+                            // false 代表这是音效 (SE)，不循环
+                            let _ = tx_cb.send(AppCommand::AudioReady(d, false)); 
+                        } 
+                    });
+                }
+                
                 // 音频数据就绪
                 AppCommand::AudioReady(data, is_bgm) => {
                     if let Some(mgr) = &self.audio_manager { 
@@ -909,7 +921,7 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
             ui.separator();
             ui.heading("📂 资源管理");
             
-            // 槽位选择
+// 槽位选择
             ui.horizontal(|ui| {
                 ui.label("槽位:");
                 for i in 0..5 { 
@@ -919,9 +931,9 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
                 }
             });
             
-            // 资源操作按钮
+            
             ui.horizontal(|ui| {
-                if ui.button("📥 Spine").clicked() {
+                if ui.button("📥 Spine立绘").clicked() {
                     if let Some(p) = rfd::FileDialog::new()
                         .add_filter("Atlas", &["atlas"])
                         .pick_file() 
@@ -940,11 +952,41 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
                         cmd_to_send = Some(AppCommand::LoadBackground(p.display().to_string()));
                     }
                 }
-                if ui.add(egui::Button::new("🗑 移除").fill(Color32::from_rgb(150, 40, 40))).clicked() {
+                if ui.add(egui::Button::new("移除立绘").fill(Color32::from_rgb(150, 40, 40))).clicked() {
                     cmd_to_send = Some(AppCommand::RemoveCharacter(app.selected_slot));
                 }
-                if ui.button("🏃 预览").clicked() { 
+                if ui.button("动作选择/预览").clicked() { 
                     app.show_anim_preview = true; 
+                }
+            });
+
+            // --- 音频管理模块 ---
+            ui.separator();
+            ui.heading("🎵 音频管理");
+            ui.horizontal(|ui| {
+                // 1. 导入音乐（循环播放）
+                if ui.button("🔁 导入音乐(循环)").clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("Audio", &["mp3", "wav", "ogg"])
+                        .pick_file() 
+                    {
+                        cmd_to_send = Some(AppCommand::PlayBgm(p.display().to_string()));
+                    }
+                }
+                
+                // 2. 音效（单次播放）
+                if ui.button("🔊 音效").clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("Audio", &["mp3", "wav", "ogg"])
+                        .pick_file() 
+                    {
+                        cmd_to_send = Some(AppCommand::PlaySe(p.display().to_string()));
+                    }
+                }
+                
+                // 3. 停止音乐
+                if ui.add(egui::Button::new("⏹ 停止音乐").fill(Color32::from_rgb(150, 40, 40))).clicked() {
+                    cmd_to_send = Some(AppCommand::StopBgm);
                 }
             });
 
@@ -954,9 +996,9 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
             
             // 说话者信息
             ui.horizontal(|ui| {
-                ui.label("名:"); 
+                ui.label("名称:"); 
                 ui.add(egui::TextEdit::singleline(&mut scene.speaker_name).desired_width(80.0));
-                ui.label("属:"); 
+                ui.label("所属:"); 
                 ui.add(egui::TextEdit::singleline(&mut scene.speaker_aff).desired_width(80.0));
             });
             
