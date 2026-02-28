@@ -1,6 +1,6 @@
 [package]
 name = "aefr"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 authors = ["OxidizedSchale<3997101522@qq.com>"]
 description = "AEFR's Eternal Freedom & Rust-rendered - A high-performance, open-source editor for Blue Archive fan-content."
