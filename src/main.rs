@@ -11,7 +11,7 @@
  *
  * ----------------------------------------------------------------------------
  *
- * [项目架构概述 / Architecture Overview]
+ *[项目架构概述 / Architecture Overview]
  *
  * AEFR 是一个基于 Rust 的高性能《蔚蓝档案》二创编辑器引擎。
  * 它采用了以下核心技术栈：
@@ -209,8 +209,7 @@ impl SpineObject {
         // 2. 加载纹理图片
         let img_path = atlas_path.parent().ok_or("Invalid path")?.join(&page_name);
         let img = image::open(&img_path).map_err(|e| format!("Image Load Error: {}", e))?;
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [img.width() as _, img.height() as _], 
+        let color_image = egui::ColorImage::from_rgba_unmultiplied([img.width() as _, img.height() as _], 
             img.to_rgba8().as_raw()
         );
 
@@ -381,7 +380,7 @@ impl AefrApp {
         let audio_manager = AudioManager::new().ok(); // 音频管理器可能初始化失败
         
         // 创建初始场景
-        let startup_text = "AEFR 已启动\n正在等待指令......";
+        let startup_text = "AEFR 已启动！\n正在等待指令......";
         let mut first_scene = Scene::default();
         first_scene.speaker_name = "OxidizedSchale".into();
         first_scene.speaker_aff = "AEFR Contributors".into();
@@ -435,7 +434,7 @@ impl AefrApp {
                    });
                 }
             }
-        } else if cmd_lower.starts_with("anim ") { // anim [槽位] [动画名] [循环]
+        } else if cmd_lower.starts_with("anim ") { // anim [槽位][动画名] [循环]
             let parts: Vec<&str> = input_trimmed.split_whitespace().collect();
             if parts.len() >= 2 {
                 if let Ok(idx) = parts[1].parse::<usize>() {
@@ -448,7 +447,7 @@ impl AefrApp {
                     });
                 }
             }
-        } else if cmd_lower.starts_with("bgm ") { // bgm [路径]
+        } else if cmd_lower.starts_with("bgm ") { // bgm[路径]
              let _ = tx.send(AppCommand::PlayBgm(input_trimmed[4..].trim().replace("\"", "")));
         } else if cmd_lower.starts_with("se ") { // se [路径]
              let _ = tx.send(AppCommand::PlaySe(input_trimmed[3..].trim().replace("\"", "")));
@@ -525,8 +524,7 @@ impl AefrApp {
                     let path_clone = path.clone();
                     thread::spawn(move || {
                         if let Ok(img) = image::open(&path_clone) {
-                            let c_img = egui::ColorImage::from_rgba_unmultiplied(
-                                [img.width() as _, img.height() as _], 
+                            let c_img = egui::ColorImage::from_rgba_unmultiplied([img.width() as _, img.height() as _], 
                                 img.to_rgba8().as_raw()
                             );
                             let _ = tx_cb.send(AppCommand::LoadBackgroundSuccess(c_img));
@@ -558,14 +556,13 @@ impl AefrApp {
                     });
                     self.scenario.scenes[self.current_scene_idx].bgm_path = Some(path);
                 }
-                
-                // 播放音效 (新增)
+
+                // 播放音效
                 AppCommand::PlaySe(path) => {
                     let tx_cb = self.tx.clone();
                     let path_clone = path.clone();
                     thread::spawn(move || { 
                         if let Ok(d) = std::fs::read(&path_clone) { 
-                            // false 代表这是音效 (SE)，不循环
                             let _ = tx_cb.send(AppCommand::AudioReady(d, false)); 
                         } 
                     });
@@ -665,18 +662,21 @@ impl eframe::App for AefrApp {
                 // 右上角按钮
                 draw_top_right_buttons(ui, rect, &mut self.is_auto_enabled);
                 
-                // 对话框
+                // 🌟 对话框渲染逻辑：只有当【已提交】的对话内容不为空时，才显示对话框
                 if self.show_dialogue {
-                    let scene = &self.scenario.scenes[self.current_scene_idx];
-                    let text: String = self.target_chars.iter().take(self.visible_count).collect();
-                    if draw_ba_dialogue(
-                        ui, rect, 
-                        &scene.speaker_name, 
-                        &scene.speaker_aff, 
-                        &text, 
-                        self.visible_count >= self.target_chars.len()
-                    ) { 
-                        self.visible_count = self.target_chars.len(); // 点击跳过打字机
+                    let committed_text: String = self.target_chars.iter().collect();
+                    if !committed_text.trim().is_empty() {
+                        let scene = &self.scenario.scenes[self.current_scene_idx];
+                        let text: String = self.target_chars.iter().take(self.visible_count).collect();
+                        if draw_ba_dialogue(
+                            ui, rect, 
+                            &scene.speaker_name, 
+                            &scene.speaker_aff, 
+                            &text, 
+                            self.visible_count >= self.target_chars.len()
+                        ) { 
+                            self.visible_count = self.target_chars.len(); // 点击跳过打字机
+                        }
                     }
                 }
                 
@@ -775,8 +775,7 @@ fn draw_ba_dialogue(ui: &mut egui::Ui, screen: Rect, name: &str, affiliation: &s
     
     // 绘制分割线
     let pad_x = (screen.width() * 0.08).max(100.0); // 两侧内边距
-    ui.painter().line_segment(
-        [Pos2::new(pad_x, line_y), Pos2::new(screen.right() - pad_x, line_y)], 
+    ui.painter().line_segment([Pos2::new(pad_x, line_y), Pos2::new(screen.right() - pad_x, line_y)], 
         Stroke::new(1.5, Color32::from_rgb(100, 120, 150))
     );
 
@@ -797,8 +796,8 @@ fn draw_ba_dialogue(ui: &mut egui::Ui, screen: Rect, name: &str, affiliation: &s
                 Color32::from_rgb(100, 200, 255)
             );
             let aff_height = aff_gal.rect.height();
-            // 🌟 严谨：强制底部像素级对齐，多往上提 5px 抵消视觉误差
-            let y_offset = n_height - aff_height - 5.0; 
+            // 🌟 严谨：强制底部像素级对齐，多往上提 2px 抵消视觉误差
+            let y_offset = n_height - aff_height - 2.0; 
             
             ui.painter().galley(n_pos, n_gal.clone(), Color32::WHITE);
             ui.painter().galley(
@@ -843,7 +842,7 @@ fn draw_ba_dialogue(ui: &mut egui::Ui, screen: Rect, name: &str, affiliation: &s
 /// 绘制创作者控制面板
 fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
     let mut cmd_to_send = None; // 待发送的命令
-    egui::Window::new("创作者面板 - AEFR v1.1")
+    egui::Window::new("创作者面板 - AEFR v1.1.1")
         .default_size([500.0, 600.0])
         .show(ctx, |ui| {
             // 🎬 剧本幕数管理
@@ -921,7 +920,7 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
             ui.separator();
             ui.heading("📂 资源管理");
             
-// 槽位选择
+            // 槽位选择
             ui.horizontal(|ui| {
                 ui.label("槽位:");
                 for i in 0..5 { 
@@ -931,9 +930,9 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
                 }
             });
             
-            
+            // 资源操作按钮
             ui.horizontal(|ui| {
-                if ui.button("📥 Spine立绘").clicked() {
+                if ui.button("📥 Spine").clicked() {
                     if let Some(p) = rfd::FileDialog::new()
                         .add_filter("Atlas", &["atlas"])
                         .pick_file() 
@@ -952,10 +951,10 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
                         cmd_to_send = Some(AppCommand::LoadBackground(p.display().to_string()));
                     }
                 }
-                if ui.add(egui::Button::new("移除立绘").fill(Color32::from_rgb(150, 40, 40))).clicked() {
+                if ui.add(egui::Button::new("🗑 移除").fill(Color32::from_rgb(150, 40, 40))).clicked() {
                     cmd_to_send = Some(AppCommand::RemoveCharacter(app.selected_slot));
                 }
-                if ui.button("动作选择/预览").clicked() { 
+                if ui.button("🏃 预览").clicked() { 
                     app.show_anim_preview = true; 
                 }
             });
@@ -996,9 +995,9 @@ fn draw_creator_panel(ctx: &egui::Context, app: &mut AefrApp) {
             
             // 说话者信息
             ui.horizontal(|ui| {
-                ui.label("名称:"); 
+                ui.label("名:"); 
                 ui.add(egui::TextEdit::singleline(&mut scene.speaker_name).desired_width(80.0));
-                ui.label("所属:"); 
+                ui.label("属:"); 
                 ui.add(egui::TextEdit::singleline(&mut scene.speaker_aff).desired_width(80.0));
             });
             
