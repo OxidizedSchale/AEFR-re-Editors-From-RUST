@@ -782,11 +782,16 @@ fn draw_ba_dialogue(ui: &mut egui::Ui, screen: Rect, name: &str, affiliation: &s
     // 绘制说话者姓名和所属
     if !name.is_empty() {
         let n_size = (box_h * 0.16).clamp(22.0, 30.0);
-        let n_pos = box_rect.left_top() + Vec2::new(pad_x, box_h * 0.08);
-        let n_gal = ui.painter().layout_no_wrap(name.into(), egui::FontId::proportional(n_size), Color32::WHITE);
         
+        // 1. 先生成 Galley 拿到实际渲染高度，再决定坐标
+        let n_gal = ui.painter().layout_no_wrap(name.into(), egui::FontId::proportional(n_size), Color32::WHITE);
         let n_width = n_gal.rect.width();
         let n_height = n_gal.rect.height();
+
+        // 🌟 修复点 1：位置不再从顶部往下算，而是【依托分割线往上推算】
+        // 这样不管什么字体，文字底部永远贴近 line_y
+        let margin_bottom = 4.0; // 距离分割线的固定留白，可微调
+        let n_pos = Pos2::new(box_rect.left() + pad_x, line_y - n_height - margin_bottom);
 
         if !affiliation.is_empty() {
             let aff_size = n_size * 0.75;
@@ -796,8 +801,10 @@ fn draw_ba_dialogue(ui: &mut egui::Ui, screen: Rect, name: &str, affiliation: &s
                 Color32::from_rgb(100, 200, 255)
             );
             let aff_height = aff_gal.rect.height();
-            // 🌟 严谨：强制底部像素级对齐，多往上提 2px 抵消视觉误差
-            let y_offset = n_height - aff_height - 2.0; 
+            
+            // 🌟 修复点 2：修复基线对齐
+            let visual_compensation = -3.0; // 如果觉得还偏高就把加大，觉得偏低就减小
+            let y_offset = n_height - aff_height + visual_compensation; 
             
             ui.painter().galley(n_pos, n_gal.clone(), Color32::WHITE);
             ui.painter().galley(
